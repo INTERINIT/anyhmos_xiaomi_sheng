@@ -641,6 +641,7 @@ struct binder_txn_fd_fixup {
 
 struct binder_transaction {
 	u64 hmos_sender_token, hmos_first_token;
+	struct pid *hmos_sender_tgid;
 	int debug_id;
 	struct binder_work work;
 	struct binder_thread *from;

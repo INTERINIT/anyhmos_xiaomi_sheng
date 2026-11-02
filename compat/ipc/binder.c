@@ -52,6 +52,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nsproxy.h>
+#include <linux/pid.h>
 #include <linux/poll.h>
 #include <linux/debugfs.h>
 #include <linux/rbtree.h>
@@ -122,6 +123,10 @@ module_param_named(debug_mask, binder_debug_mask, uint, 0644);
 
 char *binder_devices_param = "hmos_binder,hmos_hwbinder,hmos_vndbinder";
 module_param_named(devices, binder_devices_param, charp, 0444);
+
+/* 单向调用身份扩展仅在加载时启用 */
+static bool binder_oneway_sender_pid;
+module_param_named(oneway_sender_pid, binder_oneway_sender_pid, bool, 0444);
 
 static DECLARE_WAIT_QUEUE_HEAD(binder_user_error_wait);
 static int binder_stop_on_user_error;
@@ -1821,6 +1826,21 @@ static struct binder_thread *binder_get_txn_from_and_acq_inner(
 	return NULL;
 }
 
+/* 按接收方命名空间解析仍关联的进程标识 */
+static pid_t binder_get_oneway_sender_pid(struct binder_transaction *t)
+{
+	struct pid *sender = t->hmos_sender_tgid;
+	pid_t pid = 0;
+
+	if (!sender)
+		return 0;
+	rcu_read_lock();
+	if (pid_has_task(sender, PIDTYPE_TGID))
+		pid = pid_nr_ns(sender, task_active_pid_ns(current));
+	rcu_read_unlock();
+	return pid;
+}
+
 /**
  * binder_free_txn_fixups() - free unprocessed fd fixups
  * @t:	binder transaction for t->from
@@ -1882,6 +1902,8 @@ static void binder_free_transaction(struct binder_transaction *t)
 	 * t->buffer->transaction has already been cleared.
 	 */
 	binder_free_txn_fixups(t);
+	/* 释放事务持有的进程标识引用 */
+	put_pid(t->hmos_sender_tgid);
 	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 }
@@ -3490,6 +3512,9 @@ static void binder_transaction(struct binder_proc *proc,
 		t->from = thread;
 	else
 		t->from = NULL;
+	/* 保存单向事务的发送进程标识 */
+	if (!reply && (tr->flags & TF_ONE_WAY) && binder_oneway_sender_pid)
+		t->hmos_sender_tgid = get_task_pid(proc->tsk, PIDTYPE_TGID);
 	t->from_pid = proc->pid;
 	t->from_tid = thread->pid;
 	t->sender_euid = task_euid(proc->tsk);
@@ -4005,6 +4030,7 @@ err_get_secctx_failed:
 err_alloc_tcomplete_failed:
 	if (trace_hmos_binder_txn_latency_free_enabled())
 		binder_txn_latency_free(t);
+	put_pid(t->hmos_sender_tgid);
 	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 err_alloc_t_failed:
@@ -5221,7 +5247,7 @@ skip:
 						task_active_pid_ns(current));
 			(void)0;
 		} else {
-			trd->sender_pid = 0;
+			trd->sender_pid = binder_get_oneway_sender_pid(t);
 		}
 
 		ret = binder_apply_fd_fixups(proc, t);
