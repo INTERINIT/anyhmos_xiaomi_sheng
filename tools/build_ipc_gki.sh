@@ -6,6 +6,7 @@ work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/sheng-ipc-build.XXXXXX")
 kernel_commit=6f2f96be86b93de6ed58a2c46b456fb49734c382
 clang_commit=9f759dee5cdc5f85d076c642a192f6a9232f7058
 pahole_commit=c2b7b8c20877d267159ace36119f6340b9d12823
+libbpf_commit=94a49850c5ee61ea02dfcbabf48013391e8cecdf
 kernel_dir=$work/common
 clang_dir=$work/clang-prebuilt
 pahole_dir=$work/pahole
@@ -69,13 +70,17 @@ git -C "$pahole_dir" remote add origin \
 git -C "$pahole_dir" fetch --depth=1 origin "$pahole_commit"
 git -C "$pahole_dir" checkout -q --detach FETCH_HEAD
 test "$(git -C "$pahole_dir" rev-parse HEAD)" = "$pahole_commit"
-cmake -S "$pahole_dir" -B "$pahole_build" -DLIBBPF_EMBEDDED=OFF \
+# 使用发布版本绑定的 libbpf，保留 BTF 标签接口
+git -C "$pahole_dir" submodule update --init --depth=1 lib/bpf
+test "$(git -C "$pahole_dir/lib/bpf" rev-parse HEAD)" = "$libbpf_commit"
+cmake -S "$pahole_dir" -B "$pahole_build" -DLIBBPF_EMBEDDED=ON \
     -DBUILD_SHARED_LIBS=OFF -D__LIB=lib -DCMAKE_BUILD_TYPE=Release
 cmake --build "$pahole_build" --target pahole -j2
 pahole=$pahole_build/pahole
 "$pahole" --version | tee "$artifacts/pahole-version.txt"
 test "$("$pahole" --version)" = v1.23
 git -C "$pahole_dir" rev-parse HEAD > "$artifacts/pahole-revision.txt"
+git -C "$pahole_dir/lib/bpf" rev-parse HEAD > "$artifacts/libbpf-revision.txt"
 "$kernel_dir/scripts/cc-can-link.sh" clang --target=aarch64-linux-gnu
 "$kernel_dir/scripts/cc-can-link.sh" clang --target=aarch64-linux-gnu -static
 
