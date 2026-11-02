@@ -4,7 +4,7 @@
 #else
 #include <linux/compat.h>
 #include <linux/dma-buf.h>
-#include <linux/dma-fence-chain.h>
+#include <linux/dma-fence-array.h>
 #include <linux/dma-resv.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -17,12 +17,32 @@
 #include "../uapi/sheng_dmabuf_sync.h"
 
 #define SHENG_FENCE_LIMIT 4096U
+#define SHENG_CONTEXT_COUNT 0xffffffffULL
 
 struct sheng_fences {
 	struct dma_fence **items;
 	unsigned int count;
 	unsigned int capacity;
 };
+
+static u64 sheng_context_base;
+static atomic64_t sheng_context_next = ATOMIC64_INIT(0);
+
+// 预留唯一上下文区间，外部数组不能被误判为自建数组
+static int sheng_context_initialize(void)
+{
+	sheng_context_base = dma_fence_context_alloc((unsigned int)SHENG_CONTEXT_COUNT);
+	if (sheng_context_base > (~0ULL - SHENG_CONTEXT_COUNT))
+		return -EOVERFLOW;
+	return 0;
+}
+
+static bool sheng_owned_array(struct dma_fence *fence)
+{
+	return fence && dma_fence_is_array(fence) &&
+		fence->context >= sheng_context_base &&
+		fence->context - sheng_context_base < SHENG_CONTEXT_COUNT;
+}
 
 static void sheng_put_fences(struct dma_fence **fences, unsigned int count)
 {
@@ -33,22 +53,18 @@ static void sheng_put_fences(struct dma_fence **fences, unsigned int count)
 	kfree(fences);
 }
 
-// 同一时间线只保留较晚栅栏，限制单次合并的内存占用
-static int sheng_append_fence(struct sheng_fences *output, struct dma_fence *fence)
+static int sheng_append_fence(struct sheng_fences *output,
+	struct dma_fence *fence, bool keep_error)
 {
 	struct dma_fence **grown;
 	unsigned int i, capacity;
 
-	if (dma_fence_is_signaled(fence))
+	if (dma_fence_is_signaled(fence) && !(keep_error && fence->error < 0))
 		return 0;
 	for (i = 0; i < output->count; ++i) {
-		if (output->items[i]->context != fence->context)
-			continue;
-		if (dma_fence_is_later(fence, output->items[i])) {
-			dma_fence_put(output->items[i]);
-			output->items[i] = dma_fence_get(fence);
-		}
-		return 0;
+		// 独立栅栏可能随后失败，只合并同一个引用对象
+		if (output->items[i] == fence)
+			return 0;
 	}
 	if (output->count == SHENG_FENCE_LIMIT)
 		return -E2BIG;
@@ -64,41 +80,47 @@ static int sheng_append_fence(struct sheng_fences *output, struct dma_fence *fen
 	return 0;
 }
 
-// 仅展开完成条件为全部的链，外部数组保留原有条件
-static int sheng_collect_head(struct sheng_fences *output, struct dma_fence *head)
+// 仅展平自建 AND，保留外部容器及其完成条件
+static int sheng_collect_head(struct sheng_fences *output,
+	struct dma_fence *head, bool keep_error)
 {
-	struct dma_fence *cursor, *contained;
+	struct dma_fence_array *array;
+	unsigned int i;
 	int error;
 
-	for (cursor = dma_fence_get(head); cursor;
-	     cursor = dma_fence_chain_walk(cursor)) {
-		contained = dma_fence_chain_contained(cursor);
-		error = sheng_append_fence(output, contained);
-		if (error) {
-			dma_fence_put(cursor);
+	if (!sheng_owned_array(head))
+		return sheng_append_fence(output, head, keep_error);
+	if (dma_fence_is_signaled(head) && !keep_error)
+		return 0;
+	array = to_dma_fence_array(head);
+	for (i = 0; i < array->num_fences; ++i) {
+		if (sheng_owned_array(array->fences[i]))
+			return -EUCLEAN;
+		// 未完成集合中的已失败子项仍属于原等待结果
+		error = sheng_append_fence(output, array->fences[i], true);
+		if (error)
 			return error;
-		}
 	}
 	return 0;
 }
 
-// 用内核链合并独立依赖，连续导入不加深数组嵌套
 static struct dma_fence *sheng_merge_fences(struct dma_fence **heads,
 	unsigned int count, struct dma_fence *extra)
 {
 	struct sheng_fences output = {0};
-	struct dma_fence_chain *chain;
+	struct dma_fence_array *array;
 	struct dma_fence *result;
+	u64 offset;
 	unsigned int i;
 	int error;
 
 	for (i = 0; i < count; ++i) {
-		error = sheng_collect_head(&output, heads[i]);
+		error = sheng_collect_head(&output, heads[i], false);
 		if (error)
 			goto put_output;
 	}
 	if (extra) {
-		error = sheng_collect_head(&output, extra);
+		error = sheng_collect_head(&output, extra, true);
 		if (error)
 			goto put_output;
 	}
@@ -106,26 +128,34 @@ static struct dma_fence *sheng_merge_fences(struct dma_fence **heads,
 		kfree(output.items);
 		return dma_fence_get_stub();
 	}
-	result = output.items[0];
-	for (i = 1; i < output.count; ++i) {
-		chain = dma_fence_chain_alloc();
-		if (!chain) {
-			dma_fence_put(result);
-			while (i < output.count)
-				dma_fence_put(output.items[i++]);
-			kfree(output.items);
-			return ERR_PTR(-ENOMEM);
-		}
-		// 初始化接管两个引用，序号在本次新链内递增
-		dma_fence_chain_init(chain, result, output.items[i], i);
-		result = &chain->base;
+	if (output.count == 1) {
+		result = output.items[0];
+		kfree(output.items);
+		return result;
 	}
-	kfree(output.items);
-	return result;
+	offset = atomic64_fetch_inc(&sheng_context_next);
+	if (offset >= SHENG_CONTEXT_COUNT) {
+		error = -EOVERFLOW;
+		goto put_output;
+	}
+	array = dma_fence_array_create(output.count, output.items,
+		sheng_context_base + offset, 1, false);
+	if (!array) {
+		error = -ENOMEM;
+		goto put_output;
+	}
+	return &array->base;
 
 put_output:
 	sheng_put_fences(output.items, output.count);
 	return ERR_PTR(error);
+}
+
+// 所有失败点通过后才挂回调，失败请求不留下异步引用
+static void sheng_publish_fence(struct dma_fence *fence)
+{
+	if (sheng_owned_array(fence))
+		dma_fence_enable_sw_signaling(fence);
 }
 
 // 读取等待写者，写入等待当前全部访问者
@@ -196,6 +226,7 @@ static long sheng_export(void __user *user)
 		fput(sync->file);
 		goto put_fd;
 	}
+	sheng_publish_fence(sync->fence);
 	fd_install(fd, sync->file);
 	dma_buf_put(buffer);
 	return 0;
@@ -239,6 +270,7 @@ static long sheng_import(void __user *user)
 			if (IS_ERR(merged)) {
 				error = PTR_ERR(merged);
 			} else {
+				sheng_publish_fence(merged);
 				dma_resv_add_excl_fence(buffer->resv, merged);
 				dma_fence_put(merged);
 			}
@@ -308,9 +340,12 @@ static struct miscdevice sheng_device = {
 
 static int __init sheng_init(void)
 {
+	int error;
+
 	BUILD_BUG_ON(sizeof(struct sheng_dmabuf_sync_abi) != 16);
 	BUILD_BUG_ON(sizeof(struct sheng_dmabuf_sync_file) != 16);
-	return misc_register(&sheng_device);
+	error = sheng_context_initialize();
+	return error ? error : misc_register(&sheng_device);
 }
 
 static void __exit sheng_exit(void)
