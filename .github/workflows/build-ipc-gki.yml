@@ -22,7 +22,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev \
-            libelf-dev libncurses5 libtinfo5 rsync kmod curl git python3
+            libelf-dev libncurses5 libtinfo5 rsync kmod curl git python3 \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross cmake pkg-config \
+            libdw-dev libbpf-dev zlib1g-dev
       - name: Build and audit module
         env:
           SHENG_IPC_ARTIFACT_DIR: ${{ runner.temp }}/sheng-ipc-artifacts

@@ -5,12 +5,17 @@ repo=$(realpath "${1:?source checkout required}")
 work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/sheng-ipc-build.XXXXXX")
 kernel_commit=6f2f96be86b93de6ed58a2c46b456fb49734c382
 clang_commit=9f759dee5cdc5f85d076c642a192f6a9232f7058
+pahole_commit=c2b7b8c20877d267159ace36119f6340b9d12823
 kernel_dir=$work/common
 clang_dir=$work/clang-prebuilt
+pahole_dir=$work/pahole
+pahole_build=$work/pahole-build
+headers_dir=$work/official-headers
 output=$work/kernel-out
 module_dir=$work/module
 artifacts=${SHENG_IPC_ARTIFACT_DIR:-$work/artifacts}
-mkdir -p "$kernel_dir" "$clang_dir" "$output" "$artifacts"
+mkdir -p "$kernel_dir" "$clang_dir" "$output" "$artifacts" \
+    "$pahole_dir" "$pahole_build" "$headers_dir"
 artifacts=$(realpath "$artifacts")
 stage=source-fetch
 finish() {
@@ -51,16 +56,35 @@ printf '%s  %s\n' \
     "$artifacts/vmlinux.symvers" \
     090310ee2208e53767ff7164d8e22288029937aa42eb0a52372548abb1129e15 \
     "$artifacts/kernel-headers.tar.gz" | sha256sum -c -
-tar -xzf "$artifacts/kernel-headers.tar.gz" -C "$artifacts"
+tar -xzf "$artifacts/kernel-headers.tar.gz" -C "$headers_dir"
 release=$(sed -n 's/^#define UTS_RELEASE "\([^"]*\)"$/\1/p' \
-    "$artifacts/kernel-headers/include/generated/utsrelease.h")
+    "$headers_dir/kernel-headers/include/generated/utsrelease.h")
 test "$release" = 5.15.178-android13-8-00021-g6f2f96be86b9-ab13729987
+
+# 使用同版 pahole，保持 BTF 构建探测一致
+stage=host-tools
+git -C "$pahole_dir" init -q
+git -C "$pahole_dir" remote add origin \
+    https://git.kernel.org/pub/scm/devel/pahole/pahole.git
+git -C "$pahole_dir" fetch --depth=1 origin "$pahole_commit"
+git -C "$pahole_dir" checkout -q --detach FETCH_HEAD
+test "$(git -C "$pahole_dir" rev-parse HEAD)" = "$pahole_commit"
+cmake -S "$pahole_dir" -B "$pahole_build" -DLIBBPF_EMBEDDED=OFF \
+    -DBUILD_SHARED_LIBS=OFF -D__LIB=lib -DCMAKE_BUILD_TYPE=Release
+cmake --build "$pahole_build" --target pahole -j2
+pahole=$pahole_build/pahole
+"$pahole" --version | tee "$artifacts/pahole-version.txt"
+test "$("$pahole" --version)" = v1.23
+git -C "$pahole_dir" rev-parse HEAD > "$artifacts/pahole-revision.txt"
+"$kernel_dir/scripts/cc-can-link.sh" clang --target=aarch64-linux-gnu
+"$kernel_dir/scripts/cc-can-link.sh" clang --target=aarch64-linux-gnu -static
 
 # 使用同版生成配置和符号版本，编译结果仍需独立加载验证
 stage=kernel-prepare
 cp "$repo/compat/kernel/kernel.config" "$output/.config"
 cp "$repo/compat/kernel/kernel.config" "$artifacts/config-source"
-options=(ARCH=arm64 LLVM=1 LLVM_IAS=1 KERNELRELEASE="$release")
+options=(ARCH=arm64 LLVM=1 LLVM_IAS=1 KERNELRELEASE="$release"
+    PAHOLE="$pahole")
 make -C "$kernel_dir" O="$output" "${options[@]}" olddefconfig
 python3 - "$repo/compat/kernel/kernel.config" "$output/.config" <<'PY'
 import pathlib
@@ -85,25 +109,28 @@ if differences:
     raise SystemExit("Kernel configuration changed: " + repr(differences))
 PY
 cp "$output/.config" "$artifacts/config-prepared"
+mkdir -p "$output/include/generated" "$output/arch/arm64/include/generated"
+# 复用已验证的符号裁剪结果，避免依赖原构建机路径
+cp -a "$headers_dir/kernel-headers/include/generated/." "$output/include/generated/"
+cp -a "$headers_dir/kernel-headers/arch/arm64/include/generated/." \
+    "$output/arch/arm64/include/generated/"
 make -C "$kernel_dir" O="$output" "${options[@]}" -j2 modules_prepare
 cp "$artifacts/vmlinux.symvers" "$output/Module.symvers"
-cp -a "$artifacts/kernel-headers/include/generated/." "$output/include/generated/"
-cp -a "$artifacts/kernel-headers/arch/arm64/include/generated/." \
-    "$output/arch/arm64/include/generated/"
 cp -a "$repo/compat/ipc" "$module_dir"
-python3 - "$module_dir" "$artifacts" "$repo/tools/build_ipc_gki.sh" <<'PY'
+python3 - "$module_dir" "$artifacts" "$repo/tools/build_ipc_gki.sh" \
+    "$pahole" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-module, artifacts, script = map(pathlib.Path, sys.argv[1:])
+module, artifacts, script, pahole = map(pathlib.Path, sys.argv[1:])
 inputs = [
     path for path in sorted(module.iterdir())
     if path.suffix in {".c", ".h"} or path.name == "Makefile"
 ]
 inputs.extend([artifacts / "config-source", artifacts / "vmlinux.symvers",
-               artifacts / "kernel-headers.tar.gz", script])
+               artifacts / "kernel-headers.tar.gz", script, pahole])
 manifest = {
     "files": [{"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
               for path in inputs],
