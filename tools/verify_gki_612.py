@@ -12,6 +12,7 @@ required = [
     "CONFIG_PID_NS=y",
     "CONFIG_USER_NS=y",
     "CONFIG_UTS_NS=y",
+    "CONFIG_SYSVIPC=y",
     "CONFIG_IPC_NS=y",
     "CONFIG_NET_NS=y",
     "CONFIG_CGROUP_PIDS=y",

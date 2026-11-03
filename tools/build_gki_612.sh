@@ -65,9 +65,9 @@ make -C "$kernel" O="$output" "${options[@]}" gki_defconfig
 "$kernel/scripts/kconfig/merge_config.sh" -m -O "$output" "$output/.config" \
     "$repo/configs/gki-612-sheng.fragment"
 make -C "$kernel" O="$output" "${options[@]}" olddefconfig
-python3 "$repo/tools/verify_gki_612.py" "$output/.config"
 cp "$output/.config" "$artifacts/kernel.config"
 cp "$repo/configs/gki-612-sheng.fragment" "$artifacts/config.fragment"
+python3 "$repo/tools/verify_gki_612.py" "$output/.config"
 
 stage=kernel
 make -C "$kernel" O="$output" "${options[@]}" -j"$jobs" Image modules
