@@ -1,0 +1,40 @@
+name: Probe sheng GKI 6.12 IPC artifact
+
+on:
+  push:
+    branches:
+      - test/gki-6.12-sheng-ipc-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ipc-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install probe tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu curl python3 cpio kmod
+      - name: Load signed IPC module and query Binder version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHENG_GKI_ARTIFACT_DIR: ${{ runner.temp }}/sheng-gki612-ipc-probe
+        run: bash tools/run_gki_612_ipc_artifact.sh "$GITHUB_WORKSPACE"
+      # 保留模块入口及版本查询证据
+      - name: Upload probe results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sheng-gki612-ipc-probe-${{ github.sha }}
+          path: ${{ runner.temp }}/sheng-gki612-ipc-probe
+          if-no-files-found: warn
+          retention-days: 7
