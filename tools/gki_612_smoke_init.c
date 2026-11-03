@@ -39,6 +39,7 @@ __attribute__((noreturn)) void _start(void)
 {
     static const char marker[] = "SHENG_GKI_612_SMOKE_OK\n";
     static const char failed[] = "SHENG_GKI_612_SMOKE_FAILED\n";
+    static const long wait[2] = {1, 0};
     char version[512];
     long mounted = Call(40, (long)"proc", (long)"/proc", (long)"proc", 0, 0, 0);
     long fd = mounted == 0 ? Call(56, -100, (long)"/proc/version", 0, 0, 0, 0) : -1;
@@ -59,6 +60,6 @@ __attribute__((noreturn)) void _start(void)
     }
     /* 将输出失败交给虚拟机外部超时判定 */
     for (;;) {
-        Call(93, 1, 0, 0, 0, 0, 0);
+        Call(101, (long)wait, 0, 0, 0, 0, 0);
     }
 }
