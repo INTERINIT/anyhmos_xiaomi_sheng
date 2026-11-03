@@ -7,12 +7,12 @@ import zipfile
 
 
 SOURCE_REPO = "INTERINIT/anyhmos_xiaomi_sheng"
-SOURCE_RUN = 41711381488
-SOURCE_COMMIT = "641212e7b1163cfd828be134710f6f47d70f2800"
-ARTIFACT_ID = 13269866707
-ARTIFACT_SHA256 = "4dc9d95e2b362334a7feb52dd5fb1df2694f6bed22ed2fbcfaf419d89cb229be"
-IMAGE_SHA256 = "82800e984ad1c01d282cf8c097b789abcf7516443fa1cca65914c230968e7214"
-MODULE_SHA256 = "3ba9c5cbf3ff4d8d194d3e04303a745497904afd0f3fa5238048ec897202dafe"
+SOURCE_RUN = 41722816032
+SOURCE_COMMIT = "7ab8c811b00a76832ee9755766492dfce5d249ca"
+ARTIFACT_ID = 13274140639
+ARTIFACT_SHA256 = "d45d809668aaaf591572ef1df001c23d517bd5445273b7e5a7b4f9663b527be2"
+IMAGE_SHA256 = "263593eee6bd860481881c756a192030ced941459d2383d0bd085e45d3854740"
+MODULE_SHA256 = "cf5d98aa04c731558d8b611b1645cae0a876f6507824316768c7e26b05e21719"
 RELEASE = "6.12.69-android16-6-sheng-pidns-4k+"
 
 
@@ -75,19 +75,22 @@ def verify(log_path):
     lines = log.splitlines()
     required = ["SHENG_GKI_612_SIG_ENFORCED", "SHENG_GKI_612_FINIT_RESULT=0",
         "SHENG_GKI_612_IPC_LOAD_OK", "SHENG_GKI_612_BINDER_VERSION_8",
-        "SHENG_GKI_612_IPC_SMOKE_OK"]
+        "SHENG_GKI_612_IPC_FORK_TOKENS_OK",
+        "SHENG_GKI_612_IPC_TRANSACTION_FD_ROUNDTRIP_OK",
+        "SHENG_GKI_612_IPC_TRANSACTION_HELPER_EXIT_0", "SHENG_GKI_612_IPC_SMOKE_OK"]
     for marker in required:
         if lines.count(marker) != 1:
             raise SystemExit("Missing or duplicate IPC marker: " + marker)
     for marker in ["SHENG_IPC private-api-end ret=0", "SHENG_IPC binder-end ret=0"]:
         if marker not in log:
             raise SystemExit("Missing module initialization evidence: " + marker)
-    for failed in ["SHENG_GKI_612_IPC_SMOKE_FAILED", "Kernel panic",
+    for failed in ["SHENG_GKI_612_IPC_SMOKE_FAILED",
+        "SHENG_IPC_TRANSACTION_ERROR", "SHENG_GKI_612_IPC_TRANSACTION_FAILED", "Kernel panic",
         "CFI failure", "module verification failed", "Unknown symbol",
         "disagrees about version", "BUG:", "WARNING:"]:
         if failed in log:
             raise SystemExit("IPC runtime failure: " + failed)
-    print("SHENG_GKI_612_IPC_LOAD_AND_VERSION_PASS")
+    print("SHENG_GKI_612_IPC_TRANSACTION_AND_FD_PASS")
 
 
 if __name__ == "__main__":

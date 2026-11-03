@@ -95,7 +95,44 @@ __attribute__((noreturn)) static void Fail(void)
 }
 
 
-/* 仅验证签名模块加载及 Binder 版本查询 */
+/* 在独立子进程中执行事务与描述符验证 */
+static void RunTransactions(void)
+{
+    static const char path[] = "/probe/binder-transaction";
+    static const char *const arguments[] = {path, 0};
+    static const char marker[] = "SHENG_GKI_612_IPC_TRANSACTION_HELPER_EXIT_0\n";
+    static const long wait[2] = {1, 0};
+    long child = Call(220, 17, 0, 0, 0, 0, 0);
+    long result;
+    int status = -1;
+
+    if (child < 0) {
+        Fail();
+    }
+    if (child == 0) {
+        Call(221, (long)path, (long)arguments, 0, 0, 0, 0);
+        Call(93, 127, 0, 0, 0, 0, 0);
+        for (;;) {
+            Call(101, (long)wait, 0, 0, 0, 0, 0);
+        }
+    }
+    do {
+        result = Call(260, child, (long)&status, 0, 0, 0, 0);
+    } while (result == -4);
+    if (result != child || status != 0) {
+        Fail();
+    }
+    /* 留出窗口观察关闭端点后的延迟回收 */
+    do {
+        result = Call(101, (long)wait, 0, 0, 0, 0, 0);
+    } while (result == -4);
+    if (result != 0 || Write(marker, sizeof(marker) - 1) != 0 || Drain() != 0) {
+        Fail();
+    }
+}
+
+
+/* 验证模块入口后执行独立事务测试 */
 __attribute__((noreturn)) void _start(void)
 {
     static const char generic[] = "SHENG_GKI_612_SMOKE_OK\n";
@@ -154,6 +191,7 @@ __attribute__((noreturn)) void _start(void)
         Write(binder, sizeof(binder) - 1) != 0 || Drain() != 0) {
         Fail();
     }
+    RunTransactions();
     count = Read("/proc/sys/kernel/tainted", buffer, sizeof(buffer));
     if (count != 5 || buffer[0] != '4' || buffer[1] != '0' ||
         buffer[2] != '9' || buffer[3] != '6' || buffer[4] != '\n') {
