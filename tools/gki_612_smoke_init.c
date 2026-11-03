@@ -17,20 +17,24 @@ static long Call(long number, long first, long second, long third,
 }
 
 
-static void Write(const char *text, unsigned long length)
+static long Write(const char *text, unsigned long length)
 {
     while (length) {
         long count = Call(64, 1, (long)text, (long)length, 0, 0, 0);
+        if (count == -4) {
+            continue;
+        }
         if (count <= 0) {
-            return;
+            return -1;
         }
         text += count;
         length -= (unsigned long)count;
     }
+    return 0;
 }
 
 
-/* 读取真实内核版本后关闭虚拟机 */
+/* 等待串口发送完成后关闭虚拟机 */
 __attribute__((noreturn)) void _start(void)
 {
     static const char marker[] = "SHENG_GKI_612_SMOKE_OK\n";
@@ -40,14 +44,21 @@ __attribute__((noreturn)) void _start(void)
     long fd = mounted == 0 ? Call(56, -100, (long)"/proc/version", 0, 0, 0, 0) : -1;
     long count = fd >= 0 ? Call(63, fd, (long)version, sizeof(version), 0, 0, 0) : -1;
 
-    if (count > 0) {
-        Write(version, (unsigned long)count);
-        Write(marker, sizeof(marker) - 1);
-    } else {
+    long success = count > 0 && Write(version, (unsigned long)count) == 0 &&
+        Write(marker, sizeof(marker) - 1) == 0;
+    long drained;
+
+    if (!success) {
         Write(failed, sizeof(failed) - 1);
     }
-    Call(142, 0xfee1dead, 672274793, 0x4321fedc, 0, 0, 0);
+    do {
+        drained = Call(29, 1, 0x5409, 1, 0, 0, 0);
+    } while (drained == -4);
+    if (success && drained == 0) {
+        Call(142, 0xfee1dead, 672274793, 0x4321fedc, 0, 0, 0);
+    }
+    /* 将输出失败交给虚拟机外部超时判定 */
     for (;;) {
-        Call(93, count > 0 ? 0 : 1, 0, 0, 0, 0, 0);
+        Call(93, 1, 0, 0, 0, 0, 0);
     }
 }
