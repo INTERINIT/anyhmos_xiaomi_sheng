@@ -1,0 +1,40 @@
+name: Build sheng GKI 6.12
+
+on:
+  push:
+    branches:
+      - test/gki-6.12-sheng
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev \
+            libelf-dev libdw-dev dwarves rsync kmod cpio lz4 zstd \
+            qemu-system-arm curl git python3 pkg-config
+      - name: Build kernel and verify generic startup
+        env:
+          SHENG_GKI_ARTIFACT_DIR: ${{ runner.temp }}/sheng-gki612-artifacts
+          SHENG_GKI_JOBS: '4'
+        run: bash tools/build_gki_612.sh "$GITHUB_WORKSPACE"
+      # 分别保留内核构建结果与虚拟机启动证据
+      - name: Upload build results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sheng-gki612-${{ github.sha }}
+          path: ${{ runner.temp }}/sheng-gki612-artifacts
+          if-no-files-found: warn
+          retention-days: 7
