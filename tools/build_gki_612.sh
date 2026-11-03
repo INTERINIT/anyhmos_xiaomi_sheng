@@ -52,12 +52,30 @@ clang_bin=$toolchain/clang-r536225/bin
 "$clang_bin/clang" --version | tee "$artifacts/clang-version.txt"
 git -C "$toolchain" rev-parse HEAD > "$artifacts/clang-revision.txt"
 
+# 使用官方工具生成完整 BTF，避免旧版固定长度限制
+stage=btf-tool
+btf_tools=$work/btf-tools
+btf_commit=010d8a83d84ced4beef7779453766350db8c08cd
+btf_url=https://android.googlesource.com/kernel/prebuilts/build-tools/+/$btf_commit/linux-x86
+mkdir -p "$btf_tools/bin" "$btf_tools/lib64"
+curl --fail --location --retry 3 "$btf_url/bin/pahole?format=TEXT" \
+    | base64 --decode > "$btf_tools/bin/pahole"
+curl --fail --location --retry 3 "$btf_url/lib64/libc++.so?format=TEXT" \
+    | base64 --decode > "$btf_tools/lib64/libc++.so"
+printf '%s  %s\n' \
+    8bd05335b93d42781a7208f0655147f30cdf2dc3fbf2ce4d5da557b77375f36f "$btf_tools/bin/pahole" \
+    7b91de1cba2ad902aad871b77e58af40ec339aac6d514452f71475e895e1fba6 "$btf_tools/lib64/libc++.so" \
+    | sha256sum --check
+chmod 0755 "$btf_tools/bin/pahole"
+"$btf_tools/bin/pahole" --version | tee "$artifacts/pahole-version.txt"
+printf '%s\n' "$btf_commit" > "$artifacts/pahole-revision.txt"
+
 export KBUILD_BUILD_USER=INTERINIT
 export KBUILD_BUILD_HOST=sheng-build
 export KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH=$(git -C "$kernel" show -s --format=%ct HEAD)
 export KBUILD_BUILD_TIMESTAMP=$(git -C "$kernel" show -s --format=%cD HEAD)
-options=(ARCH=arm64 LLVM="$clang_bin/" LLVM_IAS=1)
+options=(ARCH=arm64 LLVM="$clang_bin/" LLVM_IAS=1 PAHOLE="$btf_tools/bin/pahole")
 
 # 从官方配置生成独立四千字节页和命名空间变体
 stage=config
