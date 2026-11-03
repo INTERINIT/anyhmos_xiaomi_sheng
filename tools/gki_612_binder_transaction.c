@@ -136,7 +136,7 @@ static void close_endpoint(struct endpoint *endpoint)
 
 
 /* 处理引用确认及返回消息，拒绝未知或截断的协议记录 */
-static int receive_transaction(struct endpoint *endpoint, uint32_t expected,
+static int receive_message(struct endpoint *endpoint, uint32_t expected,
     struct binder_transaction_data *transaction)
 {
     for (;;) {
@@ -173,7 +173,12 @@ static int receive_transaction(struct endpoint *endpoint, uint32_t expected,
                 return error("binder-payload-truncated");
             }
             if (command == expected && !found) {
-                memcpy(transaction, bytes + offset, sizeof(*transaction));
+                if (transaction) {
+                    memcpy(transaction, bytes + offset, sizeof(*transaction));
+                } else if (length != 0) {
+                    errno = EPROTO;
+                    return error("binder-completion-payload");
+                }
                 found = 1;
             } else if (command == BR_INCREFS || command == BR_ACQUIRE) {
                 uint32_t reply = command == BR_INCREFS ? BC_INCREFS_DONE : BC_ACQUIRE_DONE;
@@ -325,7 +330,7 @@ static int client(int token_fd, int ready_fd, int done_fd)
     }
     close(memory);
     memory = -1;
-    if (receive_transaction(&endpoint, BR_REPLY, &reply) != 0 ||
+    if (receive_message(&endpoint, BR_REPLY, &reply) != 0 ||
         unpack(&endpoint, &reply, 2, (uint64_t)state.st_ino, &packet) != 0) {
         goto done;
     }
@@ -375,7 +380,7 @@ static int server(pid_t child, int ready_fd, int done_fd)
         ioctl(endpoint.fd, BINDER_SET_CONTEXT_MGR_EXT, &manager) != 0 ||
         send_command(endpoint.fd, BC_ENTER_LOOPER, NULL, 0) != 0 ||
         transfer(ready_fd, &signal, 1, 1) != 0 ||
-        receive_transaction(&endpoint, BR_TRANSACTION, &request) != 0) {
+        receive_message(&endpoint, BR_TRANSACTION, &request) != 0) {
         goto done;
     }
     if (!mapped_range(&endpoint, request.data.ptr.buffer, sizeof(packet))) {
@@ -404,7 +409,9 @@ static int server(pid_t child, int ready_fd, int done_fd)
     }
     close(received);
     received = -1;
-    if (release_buffer(&endpoint, &request) != 0 ||
+    /* 接收回复完成通知，再释放接收缓冲区 */
+    if (receive_message(&endpoint, BR_TRANSACTION_COMPLETE, NULL) != 0 ||
+        release_buffer(&endpoint, &request) != 0 ||
         transfer(done_fd, &signal, 1, 0) != 0 || signal != 'D') {
         goto done;
     }
