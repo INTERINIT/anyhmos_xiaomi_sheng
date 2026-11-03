@@ -77,6 +77,13 @@ export SOURCE_DATE_EPOCH=$(git -C "$kernel" show -s --format=%ct HEAD)
 export KBUILD_BUILD_TIMESTAMP=$(git -C "$kernel" show -s --format=%cD HEAD)
 options=(ARCH=arm64 LLVM="$clang_bin/" LLVM_IAS=1 PAHOLE="$btf_tools/bin/pahole")
 
+# 将带版本的类型表编入独立内核副本
+stage=ipc-overlay
+ipc_overlay=$repo/external/overlays/hmos-work--gki-sheng-612-exports/drivers/android
+cp "$ipc_overlay/sheng_hmos_api_v2.h" "$kernel/drivers/android/"
+cp "$ipc_overlay/sheng_hmos_exports.c" "$kernel/drivers/android/"
+printf '\n%s\n' 'obj-y += sheng_hmos_exports.o' >> "$kernel/drivers/android/Makefile"
+
 # 从官方配置生成独立四千字节页和命名空间变体
 stage=config
 make -C "$kernel" O="$output" "${options[@]}" gki_defconfig
@@ -96,9 +103,18 @@ cp "$output/Module.symvers" "$artifacts/Module.symvers"
 cp "$output/include/config/kernel.release" "$artifacts/kernel.release"
 "$clang_bin/llvm-readelf" -h "$output/vmlinux" > "$artifacts/vmlinux-elf-header.txt"
 
+# 使用同一配置严格编译独立鸿蒙 IPC 模块
+stage=ipc-module
+make -C "$kernel" O="$output" "${options[@]}" -j"$jobs" \
+    M="$repo/compat/ipc612" modules
+cp "$repo/compat/ipc612/sheng_hmos_ipc.ko" "$artifacts/sheng_hmos_ipc.ko"
+modinfo "$artifacts/sheng_hmos_ipc.ko" > "$artifacts/sheng_hmos_ipc.modinfo"
+
 stage=module-archive
 modules=$work/modules-stage
 make -C "$kernel" O="$output" "${options[@]}" \
+    INSTALL_MOD_PATH="$modules" INSTALL_MOD_STRIP=1 modules_install
+make -C "$kernel" O="$output" "${options[@]}" M="$repo/compat/ipc612" \
     INSTALL_MOD_PATH="$modules" INSTALL_MOD_STRIP=1 modules_install
 release=$(cat "$artifacts/kernel.release")
 # 仅移除模块暂存树内的构建路径链接
@@ -138,5 +154,6 @@ python3 "$repo/tools/verify_gki_612.py" "$output/.config" "$artifacts/qemu-smoke
 
 stage=artifact-audit
 (cd "$artifacts" && sha256sum Image vmlinux System.map Module.symvers \
-    kernel.config kernel.release modules.tar.gz smoke-initramfs.cpio.gz qemu-smoke.log > SHA256SUMS)
+    kernel.config kernel.release modules.tar.gz smoke-initramfs.cpio.gz qemu-smoke.log \
+    sheng_hmos_ipc.ko sheng_hmos_ipc.modinfo > SHA256SUMS)
 stage=complete
