@@ -5,6 +5,15 @@ on:
     branches:
       - test/gki-6.12-sheng-board-smoke
   workflow_dispatch:
+    inputs:
+      text_offset:
+        description: Source Image text offset (build evidence only)
+        type: choice
+        required: true
+        default: '0x0'
+        options:
+          - '0x0'
+          - '0x80000'
 
 permissions:
   contents: read
@@ -28,13 +37,14 @@ jobs:
         env:
           SHENG_GKI_ARTIFACT_DIR: ${{ runner.temp }}/sheng-gki612-board-artifacts
           SHENG_GKI_JOBS: '4'
+          SHENG_GKI_TEXT_OFFSET: ${{ inputs.text_offset || '0x0' }}
         run: bash tools/build_gki_612_board_smoke.sh "$GITHUB_WORKSPACE"
       # 保留板级构建结果及未验收状态
       - name: Upload build results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: sheng-gki612-board-${{ github.sha }}
+          name: sheng-gki612-board-${{ github.sha }}-text${{ inputs.text_offset || '0x0' }}
           path: ${{ runner.temp }}/sheng-gki612-board-artifacts
           if-no-files-found: warn
           retention-days: 7

@@ -2,6 +2,11 @@
 set -euo pipefail
 
 repo=$(realpath "${1:?source checkout required}")
+text_offset=${SHENG_GKI_TEXT_OFFSET:-0x0}
+case "$text_offset" in
+    0x0|0x80000) ;;
+    *) printf '%s\n' 'Unsupported SHENG_GKI_TEXT_OFFSET' >&2; exit 2 ;;
+esac
 work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/sheng-gki612-board.XXXXXX")
 artifacts=${SHENG_GKI_ARTIFACT_DIR:-$work/artifacts}
 kernel=$work/common
@@ -18,8 +23,8 @@ artifacts=$(realpath "$artifacts")
 finish()
 {
     local status=$?
-    printf '{"exit_code":%d,"stage":"%s","device_tested":false,"temp_boot_packaging_verified":false}\n' \
-        "$status" "$stage" > "$artifacts/build-result.json"
+    printf '{"exit_code":%d,"stage":"%s","text_offset":"%s","device_tested":false,"temp_boot_packaging_verified":false}\n' \
+        "$status" "$stage" "$text_offset" > "$artifacts/build-result.json"
     exit "$status"
 }
 
@@ -38,6 +43,14 @@ test "$(make -s -C "$kernel" kernelversion)" = 6.12.69
 git -C "$kernel" rev-parse HEAD > "$artifacts/kernel-revision.txt"
 git -C "$repo" rev-parse HEAD > "$artifacts/recipe-revision.txt"
 cp "$kernel/build.config.constants" "$artifacts/build.config.constants"
+
+# 核对原源码后引入偏移参数，保持链接起点
+stage=text-offset-source
+python3 "$repo/tools/verify_gki_612_board_smoke.py" \
+    --prepare-kernel-source "$kernel" --text-offset "$text_offset" \
+    --source-metadata "$artifacts/text-offset-source.json"
+git -C "$kernel" diff -- arch/arm64/Makefile arch/arm64/kernel/head.S \
+    arch/arm64/kernel/image.h > "$artifacts/kernel-text-offset.patch"
 
 stage=toolchain
 git -C "$toolchain" init -q
@@ -75,7 +88,8 @@ export KBUILD_BUILD_HOST=sheng-build
 export KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH=$(git -C "$kernel" show -s --format=%ct HEAD)
 export KBUILD_BUILD_TIMESTAMP=$(git -C "$kernel" show -s --format=%cD HEAD)
-options=(ARCH=arm64 LLVM="$clang_bin/" LLVM_IAS=1 PAHOLE="$btf_tools/bin/pahole")
+options=(ARCH=arm64 LLVM="$clang_bin/" LLVM_IAS=1 PAHOLE="$btf_tools/bin/pahole"
+    TEXT_OFFSET="$text_offset")
 
 # 将独立初始化入口编入镜像，拒绝外部旧启动环境
 stage=board-init
@@ -104,7 +118,8 @@ make -C "$kernel" O="$output" "${options[@]}" gki_defconfig
     --set-str INITRAMFS_SOURCE "$work/board-initramfs.list"
 make -C "$kernel" O="$output" "${options[@]}" olddefconfig
 cp "$output/.config" "$artifacts/kernel.config"
-python3 "$repo/tools/verify_gki_612_board_smoke.py" "$output/.config"
+python3 "$repo/tools/verify_gki_612_board_smoke.py" "$output/.config" \
+    --text-offset "$text_offset"
 
 stage=kernel-and-dtb
 make -C "$kernel" O="$output" "${options[@]}" -j"$jobs" Image "qcom/$board.dtb"
@@ -117,11 +132,15 @@ cp "$rootfs/init" "$artifacts/board-init.elf"
 cp "$repo/configs/boards/$board.dts" "$artifacts/$board.dts"
 cp "$repo/configs/gki-612-sheng-smoke.fragment" "$artifacts/board.config.fragment"
 python3 "$repo/tools/verify_gki_612_board_smoke.py" \
-    "$output/.config" "$artifacts/$board.dtb"
+    "$output/.config" "$artifacts/$board.dtb" --text-offset "$text_offset" \
+    --image "$artifacts/Image" --vmlinux "$artifacts/vmlinux" \
+    --kernel-source "$kernel" --source-metadata "$artifacts/text-offset-source.json" \
+    --artifact-metadata "$artifacts/text-offset-artifact.json"
 "$clang_bin/llvm-readelf" -h "$output/vmlinux" > "$artifacts/vmlinux-elf-header.txt"
 
 # 仅交付构建证据，临时启动封装需单独验收
 stage=artifact-audit
 (cd "$artifacts" && sha256sum Image vmlinux System.map kernel.config \
-    kernel.release board-init.elf "$board.dtb" > SHA256SUMS)
+    kernel.release board-init.elf "$board.dtb" text-offset-source.json \
+    text-offset-artifact.json kernel-text-offset.patch > SHA256SUMS)
 stage=complete-build-only
